@@ -35,6 +35,7 @@ from typing import Optional
 from pydantic import BaseModel, model_validator
 from services.langgraph_service import LangGraphService
 from services.analytics_service import AnalyticsService
+from services.llm_context import set_llm_key, classify_llm_error
 
 import time
 
@@ -435,6 +436,72 @@ async def get_current_user_id(credentials: HTTPAuthorizationCredentials = Depend
         raise HTTPException(status_code=401, detail="Token inválido o corrupto.")
 
 
+##################################################################
+# API KEY DEL LLM POR USUARIO (se introduce desde Configuración > IA)
+##################################################################
+LLM_PROVIDER_INFO = {
+    "gemini": {"label": "Google Gemini", "key_url": "https://aistudio.google.com/apikey"},
+    "openai": {"label": "NVIDIA (build.nvidia.com)", "key_url": "https://build.nvidia.com"},
+}
+
+def _server_llm_key_configured() -> bool:
+    """True si el servidor tiene una clave propia en el entorno (solo uso local opcional)."""
+    if ACTIVE_MODEL == "gemini":
+        return bool(os.getenv("GEMINI_API_KEY", "").strip() or os.getenv("GOOGLE_API_KEY", "").strip())
+    return bool(os.getenv("NVIDIA_API_KEY", "").strip())
+
+async def bind_llm_key(user_id: str) -> None:
+    """
+    Fija la API key del LLM del usuario para la petición en curso (ContextVar).
+    Si no tiene clave y el servidor tampoco, responde 428 antes de hacer ningún trabajo.
+    """
+    creds = await db_service.get_llm_credentials(user_id)
+    if creds and creds.get("api_key"):
+        set_llm_key(creds["api_key"])
+        return
+    set_llm_key(None)
+    if not _server_llm_key_configured():
+        raise HTTPException(status_code=428, detail="LLM_KEY_MISSING")
+
+def llm_http_error(e: Exception, prefix: str = "") -> HTTPException:
+    """Convierte errores del proveedor del LLM en respuestas HTTP con un código estable."""
+    code = classify_llm_error(e)
+    if code == "LLM_KEY_MISSING":
+        return HTTPException(status_code=428, detail=code)
+    if code == "LLM_KEY_INVALID":
+        return HTTPException(status_code=424, detail=code)
+    if code == "LLM_RATE_LIMIT":
+        return HTTPException(status_code=429, detail=code)
+    return HTTPException(status_code=500, detail=f"{prefix}{e}")
+
+async def validate_llm_key(api_key: str) -> None:
+    """
+    Comprueba con el proveedor que la clave es válida. Lanza ValueError con un mensaje
+    para el usuario si no lo es. Gemini: listar modelos (no consume cuota de generación).
+    """
+    try:
+        if ACTIVE_MODEL == "gemini":
+            from google import genai as _genai
+            client = _genai.Client(api_key=api_key)
+            await client.aio.models.list(config={"page_size": 1})
+        else:
+            from openai import AsyncOpenAI
+            client = AsyncOpenAI(api_key=api_key, base_url="https://integrate.api.nvidia.com/v1")
+            await client.chat.completions.create(
+                model=academic_agent.model,
+                messages=[{"role": "user", "content": "ping"}],
+                max_tokens=1,
+            )
+    except Exception as e:
+        code = classify_llm_error(e)
+        if code == "LLM_KEY_INVALID":
+            raise ValueError("La API key no es válida. Revisa que la hayas copiado completa.")
+        if code == "LLM_RATE_LIMIT":
+            # La clave es válida pero ha agotado su cuota: se acepta.
+            return
+        raise ValueError(f"No se pudo verificar la API key con el proveedor: {e}")
+
+
 async def get_timer_context(user_id: str, db_service: DatabaseService) -> str:
     cached = _timer_context_cache.get(user_id)
     if cached and time.monotonic() - cached[0] < TIMER_CACHE_TTL:
@@ -491,9 +558,16 @@ async def get_timer_context(user_id: str, db_service: DatabaseService) -> str:
     return result_context
 
  
+# Orígenes permitidos (frontend). En producción se define CORS_ORIGINS con la URL del frontend,
+# separando varias por comas. Por defecto, solo el desarrollo local.
+_cors_origins = [
+    o.strip().rstrip("/")
+    for o in os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
+    if o.strip()
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"], 
+    allow_origins=_cors_origins, 
     allow_methods=["*"], 
     allow_headers=["*"], 
 )
@@ -531,6 +605,9 @@ class ClockifyCredentialsRequest(BaseModel):
                 raise ValueError("Se requiere la clave API de Clockify (api_key, apiKey o token).")
             data["api_key"] = key
         return data
+
+class LLMCredentialsRequest(BaseModel):
+    api_key: str
 
 class SubjectGradeRequest(BaseModel):
     grade: float
@@ -624,8 +701,15 @@ async def get_daily_check_context(user_id: str, db_service: DatabaseService, ana
     return f"\n[CONTEXTO DE INICIO DE DÍA / PLANIFICACIÓN: {''.join(context_parts)}]"
 
 
+@app.get("/health")
+async def health():
+    """Comprobación de salud para la plataforma de hosting (no requiere autenticación)."""
+    return {"status": "ok"}
+
+
 @app.post("/api/chat")
 async def handle_chat(request: ChatRequest, user_id: str = Depends(get_current_user_id)):
+    await bind_llm_key(user_id)
     try:
         history_msgs = await db_service.get_history(user_id=user_id, limit=10)
 
@@ -668,7 +752,7 @@ async def handle_chat(request: ChatRequest, user_id: str = Depends(get_current_u
     except Exception as e:
         import sys
         print(f"[ERROR][CHAT] Error crítico en handle_chat: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise llm_http_error(e)
  
 
 @app.post("/api/chat/proactive-greeting")
@@ -676,14 +760,18 @@ async def get_proactive_greeting(
     request: Optional[ProactiveGreetingRequest] = None,
     user_id: str = Depends(get_current_user_id)
 ):
+    await bind_llm_key(user_id)
     is_force_onboarding = request.force_onboarding if request else False
     tools_raw = GLOBAL_TOOLS_SCHEMA
 
-    result = await langgraph_service.run_proactive_greeting(
-        user_id=user_id,
-        tools_raw=tools_raw,
-        is_force_onboarding=is_force_onboarding
-    )
+    try:
+        result = await langgraph_service.run_proactive_greeting(
+            user_id=user_id,
+            tools_raw=tools_raw,
+            is_force_onboarding=is_force_onboarding
+        )
+    except Exception as e:
+        raise llm_http_error(e)
 
     response_text = result["response"]
     agent_used = result["agent_used"]
@@ -705,8 +793,12 @@ async def get_proactive_greeting(
 async def trigger_daily_study_plan_review(
     user_id: str = Depends(get_current_user_id)
 ):
+    await bind_llm_key(user_id)
     tools_raw = GLOBAL_TOOLS_SCHEMA
-    result = await langgraph_service.run_daily_plan_review(user_id, tools_raw, force=True)
+    try:
+        result = await langgraph_service.run_daily_plan_review(user_id, tools_raw, force=True)
+    except Exception as e:
+        raise llm_http_error(e)
     return result
 
 @app.post("/api/login")
@@ -803,6 +895,40 @@ async def get_clockify_status(user_id: str = Depends(get_current_user_id)):
         "workspace_id": cdata.get("workspace_id"),
         "updated_at": cdata.get("updated_at")
     }
+
+@app.get("/api/user/llm-status")
+async def get_llm_status(user_id: str = Depends(get_current_user_id)):
+    info = LLM_PROVIDER_INFO.get(ACTIVE_MODEL, {"label": ACTIVE_MODEL, "key_url": ""})
+    base = {"provider": ACTIVE_MODEL, "provider_label": info["label"], "key_url": info["key_url"]}
+    creds = await db_service.get_llm_credentials(user_id)
+    if creds:
+        return {
+            **base,
+            "connected": True,
+            "source": "user",
+            "key_hint": "••••" + creds["api_key"][-4:],
+            "updated_at": creds.get("updated_at"),
+        }
+    if _server_llm_key_configured():
+        return {**base, "connected": True, "source": "server"}
+    return {**base, "connected": False}
+
+@app.post("/api/user/llm-credentials")
+async def set_llm_credentials(request: LLMCredentialsRequest, user_id: str = Depends(get_current_user_id)):
+    api_key = (request.api_key or "").strip()
+    if len(api_key) < 10 or any(c.isspace() for c in api_key):
+        raise HTTPException(status_code=400, detail="La API key no tiene un formato válido.")
+    try:
+        await validate_llm_key(api_key)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    await db_service.update_llm_credentials(user_id, ACTIVE_MODEL, api_key)
+    return {"message": "API key guardada correctamente", "connected": True, "key_hint": "••••" + api_key[-4:]}
+
+@app.delete("/api/user/llm-credentials")
+async def delete_llm_credentials(user_id: str = Depends(get_current_user_id)):
+    await db_service.delete_llm_credentials(user_id)
+    return {"message": "API key eliminada", "connected": False}
 
 @app.get("/api/user/me")
 async def get_user_me(user_id: str = Depends(get_current_user_id)):
@@ -1166,6 +1292,8 @@ async def generate_global_course_summary(
     if user_id not in course.get("teacher_ids", []):
         raise HTTPException(status_code=403, detail="Solo el profesor puede generar resúmenes globales")
         
+    await bind_llm_key(user_id)
+
     global_stats = await analytics_service.get_course_global_analytics(course_id)
     if not global_stats:
         raise HTTPException(status_code=400, detail="No hay datos suficientes para generar un resumen")
@@ -1208,4 +1336,4 @@ async def generate_global_course_summary(
         
         return {"summary": summary_text, "generated_at": generated_at}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error generando resumen: {str(e)}")
+        raise llm_http_error(e, prefix="Error generando resumen: ")

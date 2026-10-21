@@ -1,8 +1,9 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { X, Copy, Check, Trash2, UserX, Shield, Clock, Settings, Tag as TagIcon, Palette } from "lucide-react";
+import { X, Copy, Check, Trash2, UserX, Shield, Clock, Settings, Tag as TagIcon, Palette, Sparkles } from "lucide-react";
 import ClockifyConfigPanel from "./ClockifyConfigPanel";
+import LlmConfigPanel from "./LlmConfigPanel";
 import TagBadge from "./TagBadge";
 import TagColorPickerModal from "./TagColorPickerModal";
 import { setTagColorLocal, refreshTagColors } from "../utils/tagColorStore";
@@ -10,8 +11,8 @@ import { setTagColorLocal, refreshTagColors } from "../utils/tagColorStore";
 const RAW_BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
 const BACKEND_URL = RAW_BACKEND_URL.replace(/\/+$/, "");
 
-export default function SettingsModal({ isOpen, onClose, initialTab = "clockify", onSuccess, onFollowChange }) {
-  const [activeTab, setActiveTab] = useState(initialTab); // "clockify" | "privacy" | "tags"
+export default function SettingsModal({ isOpen, onClose, initialTab = "clockify", onSuccess, onFollowChange, onLlmChange }) {
+  const [activeTab, setActiveTab] = useState(initialTab); // "clockify" | "ia" | "privacy" | "tags"
 
   // Reflejo del estado de Clockify, reportado por ClockifyConfigPanel
   const [clockifyStatus, setClockifyStatus] = useState(null);
@@ -358,6 +359,26 @@ export default function SettingsModal({ isOpen, onClose, initialTab = "clockify"
             </button>
 
             <button
+              onClick={() => setActiveTab("ia")}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "10px",
+                padding: "10px 12px",
+                borderRadius: "8px",
+                border: "none",
+                backgroundColor: activeTab === "ia" ? "var(--pressed-button-bg)" : "transparent",
+                color: "var(--text-primary)",
+                fontWeight: activeTab === "ia" ? "600" : "500",
+                fontSize: "13px",
+                cursor: "pointer",
+                textAlign: "left"
+              }}
+            >
+              <Sparkles size={16} /> IA (API key)
+            </button>
+
+            <button
               onClick={() => setActiveTab("privacy")}
               style={{
                 display: "flex",
@@ -418,6 +439,19 @@ export default function SettingsModal({ isOpen, onClose, initialTab = "clockify"
                 onSuccess={onSuccess}
                 onStatusChange={setClockifyStatus}
               />
+            </div>
+
+
+            {/* PESTAÑA IA (API KEY DEL MODELO) */}
+            <div style={{ display: activeTab === "ia" ? "flex" : "none", flexDirection: "column", gap: "18px" }}>
+              <div>
+                <h4 style={{ margin: "0 0 6px 0", fontSize: "15px" }}>Modelo de IA</h4>
+                <p style={{ margin: 0, fontSize: "13px", color: "var(--text-secondary)" }}>
+                  Añade tu propia API key gratuita para que el asistente pueda responderte. Cada usuario usa la suya.
+                </p>
+              </div>
+
+              <LlmConfigPanel isActive={isOpen} onChange={onLlmChange} />
             </div>
 
 

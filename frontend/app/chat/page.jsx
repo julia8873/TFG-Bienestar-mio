@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import ChatWindow from "../components/ChatWindow";
 import ChatInput from "../components/ChatInput";
@@ -9,6 +9,7 @@ import AnalyticsDashboard from "../components/AnalyticsDashboard";
 // import CoursesDashboard from "../components/CoursesDashboard";
 import CoursesDashboard from "../components/courses/CoursesDashboard";
 import { clearTagColors } from "../utils/tagColorStore";
+import { llmErrorMessage, isLlmKeyProblem } from "../utils/llmErrors";
 
 
 import { MessageSquare, BarChart2, GraduationCap, User, Settings, LogOut, ChevronLeft, ChevronRight } from "lucide-react";
@@ -28,6 +29,9 @@ export default function ChatPage() {
   const [followKey, setFollowKey] = useState(0);
 
   const [clockifyConnected, setClockifyConnected] = useState(false);
+  // null = aún no se sabe; true/false = el usuario tiene (o no) una API key de IA utilizable
+  const [llmConnected, setLlmConnected] = useState(null);
+  const llmConnectedRef = useRef(null);
   const [activeTab, setActiveTab] = useState("chat");
   const [showProfileMenu, setShowProfileMenu] = useState(false);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(true);
@@ -73,6 +77,10 @@ export default function ChatPage() {
         } else {
           setMessages([newMsg]);
         }
+      } else if (res.status === 428) {
+        // Sin API key de IA: el saludo se mostrará cuando la añada (ver handleLlmChange)
+        llmConnectedRef.current = false;
+        setLlmConnected(false);
       }
     } catch (err) {
       console.error("Error al obtener saludo proactivo:", err);
@@ -147,6 +155,39 @@ export default function ChatPage() {
         setClockifyConnected(isConn);
         if (isConn) loadChatHistory(token);
       }
+    }
+  };
+
+  const checkLlmStatus = async () => {
+    const token = localStorage.getItem("token");
+    if (!token) return;
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/user/llm-status`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.status === 401) {
+        handleUnauthorized();
+        return;
+      }
+      if (res.ok) {
+        const data = await res.json();
+        llmConnectedRef.current = Boolean(data.connected);
+        setLlmConnected(Boolean(data.connected));
+      }
+    } catch (err) {
+      console.error("Error al comprobar la API key de IA:", err);
+    }
+  };
+
+  // Se llama desde Configuración > IA cuando cambia el estado de la API key.
+  const handleLlmChange = (connected) => {
+    const wasDisconnected = llmConnectedRef.current === false;
+    llmConnectedRef.current = connected;
+    setLlmConnected(connected);
+    // Usuario nuevo que acaba de añadir su clave: mostramos ya el saludo de bienvenida
+    if (connected && wasDisconnected && messages.length === 0) {
+      const tok = localStorage.getItem("token");
+      if (tok) triggerProactiveGreeting(tok, false);
     }
   };
 
@@ -232,6 +273,7 @@ export default function ChatPage() {
 
     fetchUserInfo();
     checkClockifyStatus();
+    checkLlmStatus();
   }, [router]);
 
   const sendMessage = async (text) => {
@@ -261,6 +303,18 @@ export default function ChatPage() {
       });
 
       if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        if (res.status === 428 || res.status === 424 || res.status === 429) {
+          // Problema con la API key de IA (falta, es inválida o se agotó el límite gratuito)
+          if (isLlmKeyProblem(errData.detail)) {
+            llmConnectedRef.current = false;
+            setLlmConnected(false);
+          }
+          // Con 428 el servidor no llegó a guardar el mensaje: lo quitamos para poder reenviarlo
+          if (res.status === 428) setMessages((prev) => prev.slice(0, -1));
+          setError(llmErrorMessage(errData.detail));
+          return;
+        }
         throw new Error(`Error del servidor: ${res.status}`);
       }
 
@@ -521,6 +575,22 @@ export default function ChatPage() {
             </div>
           ) : (
             <>
+              {llmConnected === false && (
+                <div style={{ margin: "12px 16px 0", padding: "12px 14px", background: "rgba(99,102,241,0.08)", border: "1px solid rgba(99,102,241,0.3)", borderRadius: "10px", display: "flex", alignItems: "center", gap: "12px", flexWrap: "wrap" }}>
+                  <span style={{ flex: 1, minWidth: "220px", fontSize: "13px", color: "var(--text-primary)" }}>
+                    Para chatear con el asistente necesitas añadir tu API key de IA (es gratuita).
+                  </span>
+                  <button
+                    onClick={() => {
+                      setSettingsInitialTab("ia");
+                      setShowSettingsModal(true);
+                    }}
+                    style={{ padding: "8px 14px", borderRadius: "8px", border: "none", background: "linear-gradient(135deg, #6366f1, #8b5cf6)", color: "#ffffff", fontWeight: "600", fontSize: "13px", cursor: "pointer" }}
+                  >
+                    Añadir API key
+                  </button>
+                </div>
+              )}
               <ChatWindow messages={messages} isLoading={isLoading} hasMore={hasMore} isLoadingMore={isLoadingMore} onLoadMore={loadMoreMessages} />
               {error && <div style={{ margin: "0 16px 8px", padding: "10px 14px", background: "#fef2f2", border: "1px solid #fecaca", borderRadius: "8px", color: "#dc2626", fontSize: "13px" }}>{error}</div>}
               <ChatInput onSend={sendMessage} isLoading={isLoading} />
@@ -544,9 +614,11 @@ export default function ChatPage() {
         onClose={() => {
           setShowSettingsModal(false);
           checkClockifyStatus();
+          checkLlmStatus();
         }}
         onSuccess={() => checkClockifyStatus()}
         onFollowChange={() => setFollowKey((k) => k + 1)}
+        onLlmChange={handleLlmChange}
       />
     </div>
   );

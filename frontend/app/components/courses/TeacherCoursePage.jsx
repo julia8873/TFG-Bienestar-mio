@@ -4,6 +4,7 @@ import {
   BACKEND_URL, getToken, authHeaders,
   PageShell, FullPageMessage, BackButton, ErrorBanner, CourseHeader, MarkdownText
 } from './shared';
+import { llmErrorMessage } from '../../utils/llmErrors';
 
 /* CONCLUSIONES IA DE LA CLASE*/
 
@@ -175,7 +176,7 @@ export default function TeacherCoursePage({ courseId, onNavigate }) {
         method: "POST",
         headers: authHeaders(token)
       });
-      if (!res.ok) throw new Error((await res.json()).detail || "Error generando resumen");
+      if (!res.ok) throw new Error(llmErrorMessage((await res.json()).detail) || "Error generando resumen");
       const data = await res.json();
       setSummaryText(data.summary);
       setSummaryDate(data.generated_at);

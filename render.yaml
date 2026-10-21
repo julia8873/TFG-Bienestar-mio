@@ -1,0 +1,27 @@
+# Blueprint de Render para el BACKEND (FastAPI + servidor MCP).
+# El frontend (Next.js) se despliega aparte en Vercel; ver DEPLOY.md.
+services:
+  - type: web
+    name: tfg-bienestar-backend
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    plan: free
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      # Proveedor de IA. Cada usuario pone su propia API key desde la interfaz (Configuración > IA).
+      - key: LLM_PROVIDER
+        value: gemini
+      # Secreto para firmar los tokens de sesión (lo genera Render).
+      - key: JWT_SECRET_KEY
+        generateValue: true
+      # Clave Fernet para cifrar las API keys guardadas en la base de datos (ver DEPLOY.md, paso 2).
+      - key: FERNET_SECRET_KEY
+        sync: false
+      # Cadena de conexión de MongoDB Atlas (ver DEPLOY.md, paso 1).
+      - key: MONGODB_URI
+        sync: false
+      # URL del frontend en Vercel, sin "/" final (ver DEPLOY.md, paso 4).
+      - key: CORS_ORIGINS
+        sync: false

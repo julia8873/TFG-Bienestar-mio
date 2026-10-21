@@ -288,6 +288,38 @@ class DatabaseService:
                 return None
         return creds
 
+    async def update_llm_credentials(self, user_id: str, provider: str, api_key: str) -> None:
+        """Guarda la API key del LLM del usuario (cifrada con Fernet) y su proveedor."""
+        await self.users.update_one(
+            {"_id": ObjectId(user_id)},
+            {"$set": {"llm": {
+                "provider": provider,
+                "api_key": EncryptionService.encrypt(api_key),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }}}
+        )
+
+    async def get_llm_credentials(self, user_id: str) -> dict | None:
+        """
+        Devuelve {"provider", "api_key" (descifrada), "updated_at"} o None si el usuario
+        no ha configurado clave (o si no se puede descifrar, p.ej. si cambió FERNET_SECRET_KEY).
+        """
+        user = await self.get_user_by_id(user_id)
+        creds = (user or {}).get("llm")
+        if not creds or not creds.get("api_key"):
+            return None
+        try:
+            return {**creds, "api_key": EncryptionService.decrypt(creds["api_key"])}
+        except ValueError:
+            return None
+
+    async def delete_llm_credentials(self, user_id: str) -> None:
+        """Elimina la API key del LLM del usuario."""
+        await self.users.update_one(
+            {"_id": ObjectId(user_id)},
+            {"$unset": {"llm": ""}}
+        )
+
     async def update_current_period(self, user_id: str, period_id: str):
         """Actualiza el periodo académico actual de un usuario."""
         await self.users.update_one(

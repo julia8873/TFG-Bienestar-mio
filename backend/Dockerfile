@@ -10,4 +10,5 @@ COPY . .
 EXPOSE 8000
 
 # Comando de producción (sin --reload). El hot-reload se activa en docker-compose.dev.yml
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--loop", "asyncio"]
+# El puerto lo fija la plataforma de hosting mediante $PORT (Render); en local usa el 8000.
+CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000} --loop asyncio"]

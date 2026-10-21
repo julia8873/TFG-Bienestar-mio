@@ -5,19 +5,39 @@ from dotenv import load_dotenv
 
 from services.base_chatbot_service import BaseChatbotService
 from services.base_chatbot_service import StandardResponse, FunctionCall
+from services.llm_context import resolve_llm_key
 
 load_dotenv()
+
+# Caché de clientes de Gemini por API key (cada usuario aporta la suya desde la interfaz).
+_GEMINI_CLIENTS: dict = {}
+_MAX_CACHED_CLIENTS = 64
 
 class GeminiService(BaseChatbotService):
     def __init__(self):
         super().__init__()
-        self.client = genai.Client()
         self.model = "gemini-3.5-flash-lite"
         # self.model = "gemini-3.6-flash"
         # self.model = "gemini-3.8-flash"
         # self.model = "gemini-3.1-flash-lite"
         # self.model="gemini-omni-1.1-flash"
 
+
+    @property
+    def client(self):
+        """
+        Cliente de Gemini con la API key del usuario de la petición en curso
+        (ver services/llm_context.py). Se crea de forma perezosa para que el servidor
+        pueda arrancar sin ninguna clave configurada.
+        """
+        api_key = resolve_llm_key(("GEMINI_API_KEY", "GOOGLE_API_KEY"))
+        client = _GEMINI_CLIENTS.get(api_key)
+        if client is None:
+            if len(_GEMINI_CLIENTS) >= _MAX_CACHED_CLIENTS:
+                _GEMINI_CLIENTS.clear()
+            client = genai.Client(api_key=api_key)
+            _GEMINI_CLIENTS[api_key] = client
+        return client
 
     def set_config(self, config_raw):
         """

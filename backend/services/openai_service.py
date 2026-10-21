@@ -4,19 +4,37 @@ from openai import AsyncOpenAI
 from dotenv import load_dotenv
 from services.base_chatbot_service import BaseChatbotService
 from services.base_chatbot_service import StandardResponse, FunctionCall
+from services.llm_context import resolve_llm_key
 
 load_dotenv()
+
+# Caché de clientes por API key (cada usuario aporta la suya desde la interfaz).
+_NVIDIA_CLIENTS: dict = {}
+_MAX_CACHED_CLIENTS = 64
 
 class OpenAIService(BaseChatbotService):
     def __init__(self):
         super().__init__()
-        # self.client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        self.client = AsyncOpenAI(
-            api_key=os.getenv("NVIDIA_API_KEY"),
-            base_url="https://integrate.api.nvidia.com/v1"
-        )
-
         self.model = "nvidia/nemotron-3.5-lightning-30b-a3b"
+
+    @property
+    def client(self):
+        """
+        Cliente (API compatible con OpenAI, servida por NVIDIA) con la API key del usuario
+        de la petición en curso (ver services/llm_context.py). Se crea de forma perezosa
+        para que el servidor pueda arrancar sin ninguna clave configurada.
+        """
+        api_key = resolve_llm_key(("NVIDIA_API_KEY",))
+        client = _NVIDIA_CLIENTS.get(api_key)
+        if client is None:
+            if len(_NVIDIA_CLIENTS) >= _MAX_CACHED_CLIENTS:
+                _NVIDIA_CLIENTS.clear()
+            client = AsyncOpenAI(
+                api_key=api_key,
+                base_url="https://integrate.api.nvidia.com/v1"
+            )
+            _NVIDIA_CLIENTS[api_key] = client
+        return client
 
 
     def translate_tools_to_specific_format(self, tools: list):
